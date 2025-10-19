@@ -1,344 +1,371 @@
-# Jocul Spanzuratoarea jucat automat de calculator (fara emoji-uri pentru Windows)
-
-import random
-import difflib
+# -*- coding: utf-8 -*-
+from collections import Counter
 import csv
 import os
+import difflib
+import sys
 
-# Maparea pattern-urilor la cuvintele complete (se va incarca din test.csv)
-pattern_to_word = {}
-
-# Lista de pattern-uri pentru joc
-pattern_list = list(pattern_to_word.keys())
-
-# Lista extinsa de cuvinte populare pentru referinta (se va incarca din dictionary_full.txt)
-cuvinte_referinta = []
-
-# Ordinea inteligenta de ghicire a literelor
+# Ordine optimizată de ghicire (ROMÂNĂ) - grupată pe categorii
 ORDINE_LITERE = {
-'vocale_simple': ['A', 'E', 'I', 'O', 'U'],
-'vocale_diacritice': ['Ă', 'Â', 'Î'],
-'consoane_populare': ['R', 'T', 'L', 'N', 'C', 'D', 'M', 'P', 'B', 'F', 'G', 'H', 'V'],
-'consoane_diacritice': ["Ț","Ș"],
-'consoane_rare': ['Q', 'W', 'Z', 'Y', 'X', 'J', 'K', ]
+    'vocale_simple': ['A', 'E', 'I', 'O', 'U'],
+    'vocale_diacritice': ['Ă', 'Â', 'Î'],
+    'consoane_populare': ['R', 'T', 'L', 'N', 'C', 'D', 'M', 'P', 'B', 'F', 'G', 'H', 'V', 'S'],
+    'consoane_diacritice': ['Ș', 'Ț'],
+    'consoane_rare': ['Z', 'X', 'Y', 'J', 'Q', 'W']
 }
 
-def incarca_dictionar(dict_file="dictionary_full.txt"):
-    """Incarca dictionarul din fisier"""
-    global cuvinte_referinta
-    cuvinte_referinta = []
-    if os.path.exists(dict_file):
-        with open(dict_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                word = line.strip().upper()
-                if word:
-                    cuvinte_referinta.append(word)
-        print(f"Dictionar incarcat: {len(cuvinte_referinta)} cuvinte din {dict_file}")
-    else:
-        print(f"EROARE: Fisierul dictionar nu exista: {dict_file}")
+# Lista de ordine pentru ghicire inițială
+ORDINE_INIȚIALĂ = ['A', 'E', 'I', 'O', 'U', 'Ă', 'Â', 'Î', 'R', 'T', 'L', 'N', 'C']
 
 
-def incarca_patterns(test_file="test.csv"):
-    """Incarca pattern-urile si cuvintele din fisierul CSV"""
-    global pattern_to_word, pattern_list
-    pattern_to_word = {}
-    if os.path.exists(test_file):
-        with open(test_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip header
-            for row in reader:
-                if len(row) >= 3:
-                    game_id, pattern, word = row[0].strip(), row[1].strip().upper(), row[2].strip().upper()
-                    pattern_to_word[pattern] = word
-        pattern_list = list(pattern_to_word.keys())
-        print(f"Patterns incarcate: {len(pattern_list)} din {test_file}")
-    else:
-        print(f"EROARE: Fisierul test nu exista: {test_file}")
+def normalize(s: str) -> str:
+    """Normalizează string: uppercase și strip"""
+    if s is None:
+        return ''
+    return s.strip().upper()
 
 
-def scrie_rezultate_csv(rezultate, output_file="out.csv"):
-    """Scrie rezultatele in fisierul CSV"""
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['game_id', 'total_incercari', 'cuvant_gasit', 'status', 'secventa_incercari'])
-        for result in rezultate:
-            writer.writerow(result)
-    print(f"Rezultate salvate in: {output_file}")
+def read_input_csv(path: str):
+    """Citește CSV-ul de intrare și validează rândurile."""
+    valid = []
+    errors = []
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        for lineno, row in enumerate(reader, start=1):
+            if not row:
+                errors.append((lineno, 'linie goală'))
+                continue
+            if len(row) < 3:
+                errors.append((lineno, f'campuri insuficiente: {len(row)}'))
+                continue
+            game_id = normalize(row[0])
+            pattern_initial = normalize(row[1])
+            cuvant_tinta = normalize(row[2])
+
+            if not all([game_id, pattern_initial, cuvant_tinta]):
+                errors.append((lineno, 'câmp gol'))
+                continue
+
+            if len(pattern_initial) != len(cuvant_tinta):
+                errors.append((lineno, 'lungimi pattern_initial și cuvant_tinta neconcordante'))
+                continue
+
+            valid.append((game_id, pattern_initial, cuvant_tinta))
+    return valid, errors
 
 
-def alegere_pattern():
-    return random.choice(pattern_list)
+def load_dictionary(path: str = None):
+    """Încarcă dicționarul de cuvinte."""
+    dict_words = []
+    if path and os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            for ln in f:
+                w = ln.strip()
+                if w:
+                    dict_words.append(normalize(w))
+    return dict_words
 
 
-def get_word_from_pattern(pattern):
-    return pattern_to_word[pattern]
+def pattern_matches(word: str, pattern: str) -> bool:
+    """Verifică dacă un cuvânt se potrivește cu un pattern."""
+    if len(word) != len(pattern):
+        return False
+    return all(p == '*' or p == w for w, p in zip(word, pattern))
 
 
-def get_initial_letters_from_pattern(pattern):
-    """Extrage literele cunoscute din pattern"""
-    litere_cunoscute = set()
-    for i, char in enumerate(pattern):
-        if char != '*':
-            litere_cunoscute.add(char)
-    return litere_cunoscute
+def find_matching_words(pattern: str, dictionary: list) -> set:
+    """Găsește toate cuvintele din dicționar care se potrivesc cu pattern-ul."""
+    return {word for word in dictionary if pattern_matches(word, pattern)}
 
 
-def afiseaza_stare(cuvant, litere_ghiciute):
-    afisare = ""
-    for litera in cuvant:
-        if litera in litere_ghiciute:
-            afisare += litera
-        else:
-            afisare += "*"
-    return afisare
+def calculate_letter_score(letter: str, pattern: str, matching_words: set, position: int) -> int:
+    """Calculează un scor pentru o literă bazat pe frecvență și poziție."""
+    score = 0
+
+    # Scor bazat pe frecvența în cuvintele potrivite
+    for word in matching_words:
+        if letter in word:
+            score += 1
+            # Bonus dacă litera apare în aceeași poziție
+            if position < len(word) and word[position] == letter:
+                score += 2
+
+    # Penalizări pentru litere mai puțin comune
+    if letter in 'QWXYJK':
+        score -= 5
+
+    # Bonusuri pentru litere comune
+    if letter in 'AEIOUĂÂÎ':
+        score += 3
+    if letter in 'RNTSCLMDPBFGHV':
+        score += 2
+
+    return score
 
 
-def litere_distincte(cuvant):
-    return set(cuvant)
+def get_next_guess(pattern: str, matching_words: set, used_letters: set) -> str:
+    """Alege următoarea literă folosind o strategie inteligentă."""
+    # Primele 10 ghiciri: folosește ordinea predefinită
+    if len(used_letters) < 10:
+        for letter in ORDINE_INIȚIALĂ:
+            if letter not in used_letters and letter not in pattern:
+                return letter
 
+    # După 10 ghiciri sau dacă toate literele inițiale au fost folosite
+    # Calculează scoruri pentru fiecare poziție cu '*'
+    position_scores = {}
+    asterisk_positions = [i for i, c in enumerate(pattern) if c == '*']
 
-def calculeaza_similaritate(cuvant1, cuvant2):
-    """Calculeaza similaritatea intre doua cuvinte folosind difflib"""
-    return difflib.SequenceMatcher(None, cuvant1, cuvant2).ratio()
+    if matching_words:
+        # Pentru fiecare poziție cu '*', găsește cea mai bună literă
+        for pos in asterisk_positions:
+            letter_scores = {}
+            for word in matching_words:
+                if pos < len(word):
+                    letter = word[pos]
+                    if letter not in used_letters and letter not in pattern:
+                        score = calculate_letter_score(letter, pattern, matching_words, pos)
+                        letter_scores[letter] = letter_scores.get(letter, 0) + score
+            if letter_scores:
+                best_letter = max(letter_scores.items(), key=lambda x: x[1])
+                position_scores[pos] = best_letter
 
+        # Alege perechea poziție-literă cu cel mai mare scor
+        if position_scores:
+            best_position = max(position_scores.items(), key=lambda x: x[1][1])[0]
+            return position_scores[best_position][0]
 
-def gaseste_cuvant_similar_pentru_ghicire(cuvant_curent, litere_ghiciute):
-    """Gaseste un cuvant similar din lista de referinta DOAR pentru ghicirea literelor"""
-    cuvinte_candidati = []
+    # Fallback: folosește frecvențele literelor în cuvintele rămase
+    if matching_words:
+        letter_freqs = Counter()
+        for word in matching_words:
+            for i, c in enumerate(word):
+                if pattern[i] == '*' and c not in used_letters:
+                    letter_freqs[c] += 1
 
-    for cuvant_ref in cuvinte_referinta:
-        if len(cuvant_ref) == len(cuvant_curent):
-            similaritate = calculeaza_similaritate(cuvant_curent, cuvant_ref)
-            if similaritate > 0.6:  # Mai mult de 60% similaritate
-                # Verifica daca literele ghicite se potrivesc
-                potrivire = True
-                for i, litera in enumerate(cuvant_curent):
-                    if litera in litere_ghiciute and cuvant_ref[i] != litera:
-                        potrivire = False
-                        break
-                if potrivire:
-                    cuvinte_candidati.append((cuvant_ref, similaritate))
+        if letter_freqs:
+            return max(letter_freqs.items(), key=lambda x: x[1])[0]
 
-    # Returneaza cuvantul cu cea mai mare similaritate
-    if cuvinte_candidati:
-        cuvinte_candidati.sort(key=lambda x: x[1], reverse=True)
-        cuvant_ales, similaritate = cuvinte_candidati[0]
-        return cuvant_ales
+    # Fallback final: încearcă litere nefolosite din alfabetul românesc
+    romanian_alphabet = 'AEIOUĂÂÎRTLNCDFMPBGHVSȘȚZXYJQW'
+    for letter in romanian_alphabet:
+        if letter not in used_letters and letter not in pattern:
+            return letter
 
     return None
 
 
-def gaseste_cuvant_complet_din_referinta(cuvant_curent, litere_ghiciute):
-    """Gaseste un cuvant complet din lista de referinta care se potriveste cu pattern-ul cunoscut"""
-    cuvinte_candidati = []
+def solve_hangman(target_word: str, pattern: str, dictionary: list):
+    """Rezolvă o instanță de spânzurătoarea."""
+    remaining_pattern = pattern
+    used_letters = set()
+    attempts = []
+    found = False
 
-    for cuvant_ref in cuvinte_referinta:
-        if len(cuvant_ref) == len(cuvant_curent):
-            # Verifica daca toate literele cunoscute se potrivesc
-            potrivire = True
-            for i, litera in enumerate(cuvant_curent):
-                if litera in litere_ghiciute and cuvant_ref[i] != litera:
-                    potrivire = False
+    matching_words = find_matching_words(pattern, dictionary)
+
+    # Încearcă să ghicească cuvântul complet dacă numărul de candidați este mic
+    if matching_words and len(matching_words) <= 5:
+        # Folosește primul cuvânt potrivit ca ghicire
+        guess = next(iter(matching_words))
+        if guess == target_word:
+            found = True
+            remaining_pattern = target_word
+            return found, attempts, remaining_pattern
+
+    # Bucla principală de ghicire cu strategie îmbunătățită
+    while True:
+        # Recalculează cuvintele potrivite la fiecare 10 încercări
+        if len(attempts) % 10 == 0:
+            matching_words = find_matching_words(remaining_pattern, dictionary)
+            # Încearcă ghicirea completă dacă avem încredere mare
+            if matching_words and len(matching_words) <= 3:
+                guess = next(iter(matching_words))
+                if guess == target_word:
+                    found = True
+                    remaining_pattern = target_word
                     break
 
-            if potrivire:
-                similaritate = calculeaza_similaritate(cuvant_curent, cuvant_ref)
-                cuvinte_candidati.append((cuvant_ref, similaritate))
-
-    # Returneaza cuvantul cu cea mai mare similaritate
-    if cuvinte_candidati:
-        cuvinte_candidati.sort(key=lambda x: x[1], reverse=True)
-        cuvant_ales, similaritate = cuvinte_candidati[0]
-        return cuvant_ales
-
-    return None
-
-
-def determina_tip_litera(litera):
-    """Determina tipul unei litere pentru strategia inteligenta"""
-    if litera in ORDINE_LITERE['vocale_simple']:
-        return 'vocale_simple'
-    elif litera in ORDINE_LITERE['vocale_diacritice']:
-        return 'vocale_diacritice'
-    elif litera in ORDINE_LITERE['consoane_populare']:
-        return 'consoane_populare'
-    elif litera in ORDINE_LITERE['consoane_diacritice']:
-        return 'consoane_diacritice'
-    elif litera in ORDINE_LITERE['consoane_rare']:
-        return 'consoane_rare'
-    return 'necunoscut'
-
-
-def analizeaza_pattern(cuvant, litere_ghiciute):
-    """Analizeaza pattern-ul cuvantului pentru a determina strategia"""
-    pattern = ""
-    for litera in cuvant:
-        if litera in litere_ghiciute:
-            pattern += litera
-        else:
-            pattern += "*"
-
-    # Verifica daca avem pattern-uri de tipul e***e
-    vocale_ghicite = sum(
-        1 for l in litere_ghiciute if l in ORDINE_LITERE['vocale_simple'] + ORDINE_LITERE['vocale_diacritice'])
-    consoane_ghicite = sum(1 for l in litere_ghiciute if
-                           l in ORDINE_LITERE['consoane_populare'] + ORDINE_LITERE['consoane_diacritice'] +
-                           ORDINE_LITERE['consoane_rare'])
-
-    return {
-        'pattern': pattern,
-        'vocale_ghicite': vocale_ghicite,
-        'consoane_ghicite': consoane_ghicite,
-        'trebuie_consoane': vocale_ghicite > consoane_ghicite and vocale_ghicite >= 2
-    }
-
-
-def alege_litera_inteligenta(litere_incercate, analiza_pattern, cuvant_similar=None, cuvant_curent=None):
-    """Alege urmatoarea litera folosind strategia inteligenta"""
-
-    # Daca avem un cuvant similar, sa ghicim literele in ordinea corecta din cuvantul similar
-    if cuvant_similar and cuvant_curent:
-        # Gaseste pozitiile unde literele lipsesc in cuvantul curent
-        litere_lipsa = []
-        for i, litera_curenta in enumerate(cuvant_curent):
-            if litera_curenta == '*' and i < len(cuvant_similar):
-                litera_din_similar = cuvant_similar[i]
-                if litera_din_similar not in litere_incercate:
-                    litere_lipsa.append((i, litera_din_similar))
-
-        if litere_lipsa:
-            # Sorteaza dupa pozitie pentru a ghici in ordinea corecta
-            litere_lipsa.sort(key=lambda x: x[0])
-            litera_aleasa = litere_lipsa[0][1]
-            return litera_aleasa
-
-    # Daca avem un cuvant similar dar fara pattern, sa ghicim literele din el
-    if cuvant_similar:
-        litere_din_cuvant_similar = [l for l in cuvant_similar if l not in litere_incercate]
-        if litere_din_cuvant_similar:
-            # Prioritizeaza literele din cuvantul similar
-            return litere_din_cuvant_similar[0]
-
-    # Altfel, foloseste strategia normala
-    ordine_prioritati = ['vocale_simple', 'vocale_diacritice', 'consoane_populare', 'consoane_diacritice',
-                         'consoane_rare']
-
-    # Daca avem pattern-uri de vocale, sa incercam consoane
-    if analiza_pattern['trebuie_consoane']:
-        ordine_prioritati = ['consoane_populare', 'consoane_diacritice', 'consoane_rare', 'vocale_simple',
-                             'vocale_diacritice']
-
-    for tip_litera in ordine_prioritati:
-        litere_disponibile = [l for l in ORDINE_LITERE[tip_litera] if l not in litere_incercate]
-        if litere_disponibile:
-            return random.choice(litere_disponibile)
-
-    return None
-
-
-def joaca_spanzuratoarea_pentru_pattern(pattern):
-    """Joaca spanzuratoarea pentru un pattern specific - versiune optimizata"""
-    cuvant = get_word_from_pattern(pattern)
-    litere_de_ghicite = litere_distincte(cuvant)
-    litere_ghiciute = get_initial_letters_from_pattern(pattern)
-    litere_incercate = set()
-    incercari_totale = 0
-    cuvant_ghicit_complet = False
-    incercari_litere = 0
-
-    # Ghiceste literele de 10 ori
-    while incercari_litere < 10 and len(litere_ghiciute) < len(litere_de_ghicite):
-        analiza = analizeaza_pattern(cuvant, litere_ghiciute)
-        pattern_curent = afiseaza_stare(cuvant, litere_ghiciute)
-        cuvant_referinta_pentru_ghicire = gaseste_cuvant_similar_pentru_ghicire(cuvant, litere_ghiciute)
-        litera = alege_litera_inteligenta(litere_incercate, analiza, cuvant_referinta_pentru_ghicire, pattern_curent)
-        
-        if litera is None:
-            toate_literele = list(
-                ORDINE_LITERE['consoane_populare'] + ORDINE_LITERE['vocale_simple'] +
-                ORDINE_LITERE['vocale_diacritice'] + ORDINE_LITERE['consoane_diacritice'])
-            litere_noua = [l for l in toate_literele if l not in litere_incercate]
-            litera = litere_noua[0] if litere_noua else random.choice(toate_literele)
-        
-        litere_incercate.add(litera)
-        incercari_totale += 1
-        incercari_litere += 1
-        
-        if litera in cuvant:
-            litere_ghiciute.add(litera)
-        
-        if len(litere_ghiciute) == len(litere_de_ghicite):
-            cuvant_ghicit_complet = True
+        next_letter = get_next_guess(remaining_pattern, matching_words, used_letters)
+        if next_letter is None:
             break
 
-    # Dupa 10 incercari de litere, incearca sa ghiceasca cuvantul complet
-    if not cuvant_ghicit_complet:
-        cuvant_ghicit = gaseste_cuvant_complet_din_referinta(cuvant, litere_ghiciute)
-        if cuvant_ghicit == cuvant:
-            cuvant_ghicit_complet = True
-            litere_ghiciute = litere_distincte(cuvant)
-        else:
-            incercari_totale += 1
+        attempts.append(next_letter)
+        used_letters.add(next_letter)
 
-    # Continua cu ghicirea literelor daca nu a ghicit cuvantul complet
-    while not cuvant_ghicit_complet and len(litere_ghiciute) < len(litere_de_ghicite):
-        analiza = analizeaza_pattern(cuvant, litere_ghiciute)
-        pattern_curent = afiseaza_stare(cuvant, litere_ghiciute)
-        cuvant_referinta_pentru_ghicire = gaseste_cuvant_similar_pentru_ghicire(cuvant, litere_ghiciute)
-        litera = alege_litera_inteligenta(litere_incercate, analiza, cuvant_referinta_pentru_ghicire, pattern_curent)
-        
-        if litera is None:
-            toate_literele = list(
-                ORDINE_LITERE['consoane_populare'] + ORDINE_LITERE['vocale_simple'] +
-                ORDINE_LITERE['vocale_diacritice'] + ORDINE_LITERE['consoane_diacritice'])
-            litere_noua = [l for l in toate_literele if l not in litere_incercate]
-            litera = litere_noua[0] if litere_noua else random.choice(toate_literele)
-        
-        litere_incercate.add(litera)
-        incercari_totale += 1
-        
-        if litera in cuvant:
-            litere_ghiciute.add(litera)
-        
-        if len(litere_ghiciute) == len(litere_de_ghicite):
-            cuvant_ghicit_complet = True
-            break
+        if next_letter in target_word:
+            # Actualizează pattern-ul cu litera ghicită corect
+            new_pattern = ''
+            for i, (p, t) in enumerate(zip(remaining_pattern, target_word)):
+                if p != '*':
+                    new_pattern += p
+                elif t == next_letter:
+                    new_pattern += t
+                else:
+                    new_pattern += '*'
+            remaining_pattern = new_pattern
 
-    return cuvant_ghicit_complet, incercari_totale
+            if remaining_pattern == target_word:
+                found = True
+                break
+
+        # Actualizează cuvintele potrivite bazat pe noul pattern
+        matching_words = find_matching_words(remaining_pattern, matching_words if matching_words else dictionary)
+
+        # Încearcă ghicirea completă după suficientă informație
+        asterisks = remaining_pattern.count('*')
+        if asterisks <= len(remaining_pattern) // 2:
+            if matching_words and len(matching_words) <= 3:
+                guess = next(iter(matching_words))
+                if guess == target_word:
+                    found = True
+                    remaining_pattern = target_word
+                    break
+
+        # Dacă nu mai sunt candidați, reîncarcă dicționarul
+        if not matching_words:
+            matching_words = find_matching_words(remaining_pattern, dictionary)
+
+    return found, attempts, remaining_pattern
 
 
-def spanzuratoarea_automat():
-    """Joaca spanzuratoarea pentru toate pattern-urile din lista - versiune optimizata"""
-    # Incarca datele din fisiere
-    incarca_dictionar("dictionary_full.txt")
-    incarca_patterns("test.csv")
+def process_file(input_csv: str, output_csv: str, dict_path: str = None) -> int:
+    """Procesează fișierul de intrare și scrie rezultatele în output_csv."""
+    if not os.path.exists(input_csv):
+        print(f"Eroare: Fișierul de input nu există: {input_csv}")
+        return 0
 
-    # Verifica daca exista pattern-uri de jucat
-    if len(pattern_list) == 0:
-        print("EROARE: Nu au fost gasite pattern-uri in fisierul test.csv!")
-        return
+    records, errors = read_input_csv(input_csv)
+    if errors:
+        print("Erori la citirea input:")
+        for lineno, msg in errors:
+            print(f"  linia {lineno}: {msg}")
 
-    rezultate = []
-    total_incercari = 0
-    cuvinte_castigate = 0
+    if not records:
+        print(f"Eroare: Nu am găsit înregistrări valide în {input_csv}")
+        return 0
 
-    for pattern in pattern_list:
-        castigat, incercari = joaca_spanzuratoarea_pentru_pattern(pattern)
-        cuvant = get_word_from_pattern(pattern)
-        rezultate.append((pattern, cuvant, castigat, incercari))
-        total_incercari += incercari
-        if castigat:
-            cuvinte_castigate += 1
+    # Încarcă dicționarul
+    if dict_path:
+        dictionary = load_dictionary(dict_path)
+    else:
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+        default_full = os.path.join(data_dir, 'dictionary_full.txt')
+        dictionary = load_dictionary(default_full)
+
+    total_attempts = 0
+    results = []
+
+    print("\n=== REZULTATE PENTRU FIECARE CUVÂNT ===")
+    print("=" * 60)
+
+    for game_id, pattern_initial, target in records:
+        print(f"\nCuvântul #{game_id}:")
+        print(f"Pattern inițial: {pattern_initial}")
+        print(f"Țintă: {target}")
+
+        found, attempts, final_pattern = solve_hangman(target, pattern_initial, dictionary)
+
+        status = 'OK' if found else 'FAIL'
+        results.append((game_id, str(len(attempts)), final_pattern, status, ' '.join(attempts)))
+        total_attempts += len(attempts)
+
+        print(f"Status: {status}")
+        print(f"Număr încercări: {len(attempts)}")
+        if attempts:
+            print(f"Secvența: {' '.join(attempts)}")
+        print("-" * 60)
 
     # Statistici finale
-    print(f"Pattern-uri jucate: {len(pattern_list)}")
-    print(f"Pattern-uri castigate: {cuvinte_castigate}")
-    print(f"Pattern-uri pierdute: {len(pattern_list) - cuvinte_castigate}")
-    print(f"Total incercari: {total_incercari}")
-    print(f"Media incercari per pattern: {total_incercari / len(pattern_list):.1f}")
-    print(f"Rata de succes: {(cuvinte_castigate / len(pattern_list)) * 100:.1f}%")
+    print("\n=== STATISTICI FINALE ===")
+    print(f"Total cuvinte: {len(records)}")
+    print(f"Total încercări: {total_attempts}")
+    if records:
+        print(f"Medie încercări/cuvânt: {total_attempts / len(records):.2f}")
+        succes = sum(1 for r in results if r[3] == 'OK')
+        print(f"Rata succes: {succes}/{len(records)} ({succes / len(records) * 100:.1f}%)")
+    print("=" * 60)
+
+    # Scrie output
+    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    with open(output_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['game_id', 'total_incercari', 'cuvant_gasit', 'status', 'secventa_incercari'])
+        for row in results:
+            writer.writerow(row)
+
+    print(f"Scris output in: {output_csv}")
+    return total_attempts
 
 
-# Ruleaza jocul automat
-if __name__ == "__main__":
-    spanzuratoarea_automat()
+if __name__ == '__main__':
+    # Determină calea către directorul scriptului
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Determină calea către directorul rădăcină al proiectului (un nivel mai sus)
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    if len(sys.argv) > 1:
+        # Rulat din linia de comandă
+        import argparse
+
+        p = argparse.ArgumentParser()
+        p.add_argument('--input', '-i', required=True, help='fișier CSV input')
+        p.add_argument('--output', '-o', required=True, help='fișier CSV output')
+        p.add_argument('--dict', '-d', help='fișier dicționar (opțional)')
+        args = p.parse_args()
+
+        # Convert relative paths to absolute if needed
+        input_csv = os.path.abspath(args.input) if os.path.isabs(args.input) else os.path.join(os.getcwd(), args.input)
+        output_csv = os.path.abspath(args.output) if os.path.isabs(args.output) else os.path.join(os.getcwd(),
+                                                                                                  args.output)
+        dict_path = os.path.abspath(args.dict) if args.dict and os.path.isabs(args.dict) else os.path.join(os.getcwd(),
+                                                                                                           args.dict) if args.dict else None
+
+        total = process_file(input_csv, output_csv, dict_path)
+    else:
+        # Rulat direct
+        # Încearcă mai multe locații posibile pentru fișierele necesare
+        possible_paths = [
+            # Project structure
+            (os.path.join(project_dir, 'data', 'test.csv'),
+             os.path.join(project_dir, 'results', 'out.csv'),
+             os.path.join(project_dir, 'data', 'dictionary_full.txt')),
+            # Next to script
+            (os.path.join(script_dir, 'test.csv'),
+             os.path.join(script_dir, 'out.csv'),
+             os.path.join(script_dir, 'dictionary_full.txt')),
+            # Current working directory
+            (os.path.join(os.getcwd(), 'test.csv'),
+             os.path.join(os.getcwd(), 'out.csv'),
+             os.path.join(os.getcwd(), 'dictionary_full.txt')),
+            # Data subdirectories
+            (os.path.join(os.getcwd(), 'data', 'test.csv'),
+             os.path.join(os.getcwd(), 'results', 'out.csv'),
+             os.path.join(os.getcwd(), 'data', 'dictionary_full.txt'))
+        ]
+
+        # Găsește prima locație unde există test.csv
+        found_paths = None
+        for paths in possible_paths:
+            if os.path.exists(paths[0]):  # Verifică dacă există test.csv
+                found_paths = paths
+                break
+
+        if not found_paths:
+            print("Eroare: Nu găsesc fișierul test.csv în niciuna din locațiile posibile:")
+            for paths in possible_paths:
+                print(f"  - {paths[0]}")
+            sys.exit(1)
+
+        input_csv, output_csv, dict_path = found_paths
+
+        if not os.path.exists(input_csv):
+            print(f"Eroare: Nu găsesc fișierul test.csv în {data_dir}")
+            print("Căi verificate:")
+            for d in possible_data_dirs:
+                print(f"  - {os.path.join(d, 'test.csv')}")
+            sys.exit(1)
+
+        total = process_file(input_csv, output_csv, dict_path if os.path.exists(dict_path) else None)
+
+    print(f"Done. Total attempts: {total}")
